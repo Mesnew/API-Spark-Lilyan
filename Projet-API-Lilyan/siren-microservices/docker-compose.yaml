@@ -1,31 +1,75 @@
 services:
   # ===========================================
-  # MySQL Database
+  # MySQL Database (from prof)
   # ===========================================
   db:
     image: mysql:8.0
-    container_name: siren-mysql
+    container_name: mysql8
     restart: unless-stopped
-    ports:
-      - "${MYSQL_PORT:-3366}:3306"
+    mem_limit: 4g
+    env_file: ./.env
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3367:${MYSQL_PORT}"
     volumes:
+      - ./my.cnf:/etc/mysql/conf.d/my.cnf
       - db_data:/var/lib/mysql
       - ./data:/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
-      interval: 10s
+      test: [ "CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysqladmin ping -h 127.0.0.1 -usirenuser --silent" ]
+      interval: 30s
       timeout: 5s
       retries: 5
+      start_period: 30s
     networks:
       - siren-network
 
   # ===========================================
-  # OAuth2 Service (Node.js)
+  # DB CLI - Loads data into MySQL (from prof)
+  # ===========================================
+  dbcli:
+    build:
+      context: .
+      dockerfile: dbcli.Dockerfile
+    container_name: dbcli
+    mem_limit: 4g
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: ./.env
+    volumes:
+      - ./data:/app/data:ro
+    networks:
+      - siren-network
+
+  # ===========================================
+  # Spark Connect Server (from prof)
+  # ===========================================
+  spark:
+    build:
+      context: .
+      dockerfile: analyticcli.Dockerfile
+    container_name: spark
+    mem_limit: 4g
+    depends_on:
+      db:
+        condition: service_healthy
+      dbcli:
+        condition: service_completed_successfully
+    ports:
+      - "15002:15002"
+    env_file: ./.env
+    environment:
+      - JAVA_TOOL_OPTIONS=-Dlog4j2.disable.jmx=true
+    networks:
+      - siren-network
+
+  # ===========================================
+  # OAuth2 Service (Node.js) - Your API
   # ===========================================
   oauth2:
     build:
@@ -41,6 +85,9 @@ services:
       OAUTH2_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET}
       OAUTH2_USER1: ${OAUTH2_USER1}
       OAUTH2_USER2: ${OAUTH2_USER2}
+    depends_on:
+      dbcli:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
       interval: 30s
@@ -50,7 +97,7 @@ services:
       - siren-network
 
   # ===========================================
-  # API MySQL (Python FastAPI)
+  # API MySQL (Python FastAPI) - Your API
   # ===========================================
   api-mysql:
     build:
@@ -70,6 +117,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      dbcli:
+        condition: service_completed_successfully
       oauth2:
         condition: service_started
     healthcheck:
@@ -81,7 +130,7 @@ services:
       - siren-network
 
   # ===========================================
-  # API Spark (Node.js + Express)
+  # API Spark (Node.js + Express) - Your API
   # ===========================================
   api-spark:
     build:
@@ -99,9 +148,14 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       OAUTH2_URL: ${OAUTH2_URL}
+      SPARK_CONNECT_URL: spark:15002
     depends_on:
       db:
         condition: service_healthy
+      dbcli:
+        condition: service_completed_successfully
+      spark:
+        condition: service_started
       oauth2:
         condition: service_started
     healthcheck:
