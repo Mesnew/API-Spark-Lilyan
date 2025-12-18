@@ -2,7 +2,7 @@
 API MySQL pour les entreprises SIREN
 FastAPI avec Swagger, JSON-LD et OAuth2
 """
-from fastapi import FastAPI, Depends, HTTPException, Query, Request
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
@@ -93,17 +93,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Router pour API v1
+v1_router = APIRouter(prefix="/v1", tags=["v1"])
+
 
 @app.on_event("startup")
 async def startup():
     """Événement au démarrage"""
     print("=" * 50)
-    print("API MySQL démarrée")
+    print("API MySQL démarrée (v1)")
     print("Documentation: http://localhost:3001/docs")
+    print("Endpoints: http://localhost:3001/v1/")
     print("=" * 50)
 
 
-@app.get(
+@v1_router.get(
     "/health",
     response_model=schemas.HealthResponse,
     tags=["Health"],
@@ -130,7 +134,7 @@ async def health_check(db: Session = Depends(get_db)):
     }
 
 
-@app.get(
+@v1_router.get(
     "/entreprises/siren/{siren}",
     response_model=schemas.EntrepriseJSONLD,
     tags=["Entreprises"],
@@ -167,7 +171,7 @@ async def get_entreprise_by_siren(
     return schemas.EntrepriseJSONLD.from_entreprise(entreprise_data)
 
 
-@app.get(
+@v1_router.get(
     "/entreprises/activite/{code}",
     response_model=schemas.EntrepriseListJSONLD,
     tags=["Entreprises"],
@@ -240,7 +244,7 @@ async def get_entreprises_by_activite(
     )
 
 
-@app.get(
+@v1_router.get(
     "/entreprises/search",
     response_model=schemas.EntrepriseListJSONLD,
     tags=["Entreprises"],
@@ -281,18 +285,12 @@ async def search_entreprises_by_name(
 
     # Compter le total
     total = db.query(func.count(UniteLegale.siren)).filter(
-        or_(
-            UniteLegale.nom_unite_legale.ilike(search_pattern),
-            UniteLegale.denomination_unite_legale.ilike(search_pattern)
-        )
+        UniteLegale.denomination_unite_legale.ilike(search_pattern)
     ).scalar()
 
     # Récupérer les entreprises
     entreprises = db.query(UniteLegale).filter(
-        or_(
-            UniteLegale.nom_unite_legale.ilike(search_pattern),
-            UniteLegale.denomination_unite_legale.ilike(search_pattern)
-        )
+        UniteLegale.denomination_unite_legale.ilike(search_pattern)
     ).offset(offset).limit(limit).all()
 
     # Convertir en JSON-LD
@@ -327,7 +325,110 @@ async def search_entreprises_by_name(
     )
 
 
-@app.get(
+@v1_router.get(
+    "/entreprises/filter",
+    response_model=schemas.EntrepriseListJSONLD,
+    tags=["Entreprises"],
+    summary="Rechercher avec filtres multiples",
+    responses={
+        200: {"description": "Liste des entreprises"},
+        401: {"description": "Non authentifié"},
+        400: {"description": "Au moins un paramètre requis"}
+    }
+)
+async def filter_entreprises(
+    request: Request,
+    nom: Optional[str] = Query(None, min_length=3, description="Nom ou dénomination à rechercher (min 3 caractères)"),
+    activite: Optional[str] = Query(None, description="Code d'activité principale"),
+    page: int = Query(1, ge=1, description="Numéro de page"),
+    limit: int = Query(20, ge=1, le=100, description="Nombre d'éléments par page"),
+    token_data: dict = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Recherche des entreprises avec filtres combinables.
+
+    Permet de combiner plusieurs critères de recherche:
+    - **nom**: Terme de recherche sur le nom/dénomination (minimum 3 caractères)
+    - **activite**: Code d'activité principale (NAF/APE)
+    - **page**: Numéro de page (défaut: 1)
+    - **limit**: Nombre d'éléments par page (défaut: 20, max: 100)
+    - **Authorization**: Token Bearer OAuth2 requis
+
+    Au moins un des paramètres 'nom' ou 'activite' doit être fourni.
+    """
+    # Valider qu'au moins un filtre est fourni
+    if not nom and not activite:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one filter parameter (nom or activite) is required"
+        )
+
+    # Calculer l'offset
+    offset = (page - 1) * limit
+
+    # Construire la requête dynamiquement
+    query = db.query(UniteLegale)
+    filters = []
+
+    if nom:
+        search_pattern = f"%{nom}%"
+        filters.append(UniteLegale.denomination_unite_legale.ilike(search_pattern))
+
+    if activite:
+        filters.append(UniteLegale.activite_principale_unite_legale == activite)
+
+    # Appliquer tous les filtres
+    if filters:
+        query = query.filter(*filters)
+
+    # Compter le total
+    total = query.count()
+
+    # Récupérer les entreprises
+    entreprises = query.offset(offset).limit(limit).all()
+
+    # Convertir en JSON-LD
+    entreprises_jsonld = [
+        schemas.EntrepriseJSONLD.from_entreprise(schemas.EntrepriseBase.from_orm(e))
+        for e in entreprises
+    ]
+
+    # Calculer les métadonnées de pagination
+    total_pages = math.ceil(total / limit) if total > 0 else 1
+
+    # Construire l'URL de base avec les paramètres
+    params = []
+    if nom:
+        params.append(f"nom={nom}")
+    if activite:
+        params.append(f"activite={activite}")
+    base_url = f"{request.url.scheme}://{request.url.netloc}/entreprises/filter"
+    base_url_with_params = f"{base_url}?{'&'.join(params)}" if params else base_url
+
+    hydra_view = create_hydra_view(base_url_with_params, page, limit, total_pages)
+
+    pagination = schemas.PaginationMeta(
+        page=page,
+        limit=limit,
+        totalItems=total,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+        has_prev=page > 1,
+        view=hydra_view
+    )
+
+    return schemas.EntrepriseListJSONLD(
+        **{
+            "numberOfItems": len(entreprises_jsonld),
+            "totalItems": total,
+            "itemListElement": entreprises_jsonld,
+            "pagination": pagination
+        }
+    )
+
+
+@v1_router.get(
     "/",
     tags=["Info"],
     summary="Information sur l'API"
@@ -338,15 +439,20 @@ async def root():
     """
     return {
         "service": "API MySQL - Entreprises SIREN",
-        "version": "1.0.0",
+        "version": "v1",
         "documentation": "/docs",
-        "health": "/health",
+        "health": "/v1/health",
         "endpoints": {
-            "by_siren": "/entreprises/siren/{siren}",
-            "by_activite": "/entreprises/activite/{code}",
-            "search": "/entreprises/search?nom={term}"
+            "by_siren": "/v1/entreprises/siren/{siren}",
+            "by_activite": "/v1/entreprises/activite/{code}",
+            "search": "/v1/entreprises/search?nom={term}",
+            "filter": "/v1/entreprises/filter?nom={term}&activite={code}"
         }
     }
+
+
+# Monter le router v1
+app.include_router(v1_router)
 
 
 if __name__ == "__main__":

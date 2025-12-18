@@ -28,15 +28,19 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
         HTTPException: Si le token est invalide
     """
     token = credentials.credentials
+    print(f"[DEBUG] Validating token: {token[:20]}...")
+    print(f"[DEBUG] OAuth2 URL: {OAUTH2_URL}")
 
     try:
         # Appeler l'endpoint /secure de l'API OAuth2 pour valider le token
+        # Note: express-oauth-server a des problèmes avec le header Bearer,
+        # donc on utilise le query parameter access_token
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{OAUTH2_URL}/secure",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=5.0
-            )
+            url = f"{OAUTH2_URL}/v1/secure?access_token={token}"
+            print(f"[DEBUG] Calling: {url}")
+            response = await client.get(url, timeout=5.0)
+            print(f"[DEBUG] Response status: {response.status_code}")
+            print(f"[DEBUG] Response body: {response.text[:200]}")
 
             if response.status_code == 200:
                 # Token valide
@@ -50,10 +54,11 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
             else:
                 raise HTTPException(
                     status_code=500,
-                    detail="OAuth2 server error"
+                    detail=f"OAuth2 server error: {response.status_code}"
                 )
 
     except httpx.RequestError as e:
+        print(f"[DEBUG] Request error: {str(e)}")
         raise HTTPException(
             status_code=503,
             detail=f"OAuth2 server unavailable: {str(e)}"

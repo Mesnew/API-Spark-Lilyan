@@ -1,75 +1,32 @@
+# ===========================================
+# Configuration pour utiliser devAPI externe
+# ===========================================
+# PRÉREQUIS : Les conteneurs devAPI doivent être lancés AVANT
+# cd ../devAPI && docker-compose up -d
+# Conteneurs requis : mysql8, spark (dbcli se termine automatiquement)
+
 services:
   # ===========================================
-  # MySQL Database (from prof)
+  # Nginx - Reverse Proxy
   # ===========================================
-  db:
-    image: mysql:8.0
-    container_name: mysql8
+  nginx:
+    image: nginx:alpine
+    container_name: siren-nginx
     restart: unless-stopped
-    mem_limit: 4g
-    env_file: ./.env
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports:
-      - "3367:${MYSQL_PORT}"
+      - "80:80"
     volumes:
-      - ./my.cnf:/etc/mysql/conf.d/my.cnf
-      - db_data:/var/lib/mysql
-      - ./data:/data
-    healthcheck:
-      test: [ "CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysqladmin ping -h 127.0.0.1 -usirenuser --silent" ]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
       - siren-network
-
-  # ===========================================
-  # DB CLI - Loads data into MySQL (from prof)
-  # ===========================================
-  dbcli:
-    build:
-      context: .
-      dockerfile: dbcli.Dockerfile
-    container_name: dbcli
-    mem_limit: 4g
+      - devapi_default
     depends_on:
-      db:
-        condition: service_healthy
-    env_file: ./.env
-    volumes:
-      - ./data:/app/data:ro
-    networks:
-      - siren-network
+      - oauth2
+      - api-mysql
+      - api-spark
 
   # ===========================================
-  # Spark Connect Server (from prof)
-  # ===========================================
-  spark:
-    build:
-      context: .
-      dockerfile: analyticcli.Dockerfile
-    container_name: spark
-    mem_limit: 4g
-    depends_on:
-      db:
-        condition: service_healthy
-      dbcli:
-        condition: service_completed_successfully
-    ports:
-      - "15002:15002"
-    env_file: ./.env
-    environment:
-      - JAVA_TOOL_OPTIONS=-Dlog4j2.disable.jmx=true
-    networks:
-      - siren-network
-
-  # ===========================================
-  # OAuth2 Service (Node.js) - Your API
+  # OAuth2 Service (Node.js)
   # ===========================================
   oauth2:
     build:
@@ -77,27 +34,25 @@ services:
       dockerfile: Dockerfile
     container_name: siren-oauth2
     restart: unless-stopped
-    ports:
-      - "${OAUTH2_PORT:-3000}:3000"
+    expose:
+      - "3000"
     environment:
       PORT: 3000
       OAUTH2_CLIENT_ID: ${OAUTH2_CLIENT_ID}
       OAUTH2_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET}
       OAUTH2_USER1: ${OAUTH2_USER1}
       OAUTH2_USER2: ${OAUTH2_USER2}
-    depends_on:
-      dbcli:
-        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     networks:
       - siren-network
+      - devapi_default
 
   # ===========================================
-  # API MySQL (Python FastAPI) - Your API
+  # API MySQL (Python FastAPI)
   # ===========================================
   api-mysql:
     build:
@@ -105,32 +60,28 @@ services:
       dockerfile: Dockerfile
     container_name: siren-api-mysql
     restart: unless-stopped
-    ports:
-      - "${API_MYSQL_PORT:-3001}:3001"
+    expose:
+      - "3001"
     environment:
-      MYSQL_HOST: db
+      MYSQL_HOST: mysql8
       MYSQL_PORT: 3306
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
-      OAUTH2_URL: ${OAUTH2_URL}
+      OAUTH2_URL: http://oauth2:3000
     depends_on:
-      db:
-        condition: service_healthy
-      dbcli:
-        condition: service_completed_successfully
-      oauth2:
-        condition: service_started
+      - oauth2
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     networks:
       - siren-network
+      - devapi_default
 
   # ===========================================
-  # API Spark (Node.js + Express) - Your API
+  # API Spark (Python + Spark Connect)
   # ===========================================
   api-spark:
     build:
@@ -138,33 +89,23 @@ services:
       dockerfile: Dockerfile
     container_name: siren-api-spark
     restart: unless-stopped
-    ports:
-      - "${API_SPARK_PORT:-3002}:3002"
+    expose:
+      - "3002"
     environment:
       PORT: 3002
-      MYSQL_HOST: db
-      MYSQL_PORT: 3306
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      OAUTH2_URL: ${OAUTH2_URL}
-      SPARK_CONNECT_URL: spark:15002
+      SPARK_CONNECT_HOST: spark
+      SPARK_CONNECT_PORT: 15002
+      OAUTH2_URL: http://oauth2:3000
     depends_on:
-      db:
-        condition: service_healthy
-      dbcli:
-        condition: service_completed_successfully
-      spark:
-        condition: service_started
-      oauth2:
-        condition: service_started
+      - oauth2
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3002/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     networks:
       - siren-network
+      - devapi_default
 
 # ===========================================
 # Networks
@@ -172,10 +113,5 @@ services:
 networks:
   siren-network:
     driver: bridge
-
-# ===========================================
-# Volumes
-# ===========================================
-volumes:
-  db_data:
-    driver: local
+  devapi_default:
+    external: true  # Utilise le réseau existant de devAPI

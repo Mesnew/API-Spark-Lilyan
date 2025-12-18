@@ -33,13 +33,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// Swagger UI
+// Router pour API v1
+const v1Router = express.Router();
+
+// Swagger UI (hors du versioning)
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customCss: '.swagger-ui .topbar { display: none }',
   customSiteTitle: 'OAuth2 API Documentation'
 }));
 
-// Route pour le JSON Swagger
+// Route pour le JSON Swagger (hors du versioning)
 app.get('/swagger.json', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.send(swaggerSpec);
@@ -47,7 +50,7 @@ app.get('/swagger.json', (req, res) => {
 
 /**
  * @swagger
- * /health:
+ * /v1/health:
  *   get:
  *     summary: Vérifier la santé du serveur
  *     tags: [Health]
@@ -59,7 +62,7 @@ app.get('/swagger.json', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Health'
  */
-app.get('/health', (req, res) => {
+v1Router.get('/health', (req, res) => {
   res.json({
     '@context': [
       'https://schema.org/',
@@ -70,13 +73,14 @@ app.get('/health', (req, res) => {
     '@type': 'HealthCheckResponse',
     status: 'OK',
     message: 'OAuth2 Server is running',
+    version: 'v1',
     timestamp: new Date().toISOString()
   });
 });
 
 /**
  * @swagger
- * /oauth/token:
+ * /v1/oauth/token:
  *   post:
  *     summary: Obtenir un token OAuth2
  *     tags: [OAuth2]
@@ -161,11 +165,11 @@ app.get('/health', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.post('/oauth/token', app.oauth.token());
+v1Router.post('/oauth/token', app.oauth.token());
 
 /**
  * @swagger
- * /secure:
+ * /v1/secure:
  *   get:
  *     summary: Route protégée (exemple)
  *     tags: [OAuth2]
@@ -201,7 +205,7 @@ app.post('/oauth/token', app.oauth.token());
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/secure', app.oauth.authenticate(), (req, res) => {
+v1Router.get('/secure', app.oauth.authenticate(), (req, res) => {
   res.json({
     message: 'Accès sécurisé réussi!',
     user: res.locals.oauth.token.user,
@@ -213,7 +217,7 @@ app.get('/secure', app.oauth.authenticate(), (req, res) => {
 
 /**
  * @swagger
- * /me:
+ * /v1/me:
  *   get:
  *     summary: Obtenir les informations de l'utilisateur connecté
  *     tags: [Users]
@@ -244,7 +248,7 @@ app.get('/secure', app.oauth.authenticate(), (req, res) => {
  *                   type: string
  *                   example: User not found
  */
-app.get('/me', app.oauth.authenticate(), (req, res) => {
+v1Router.get('/me', app.oauth.authenticate(), (req, res) => {
   const userId = res.locals.oauth.token.user.id;
   const user = model.users.find(u => u.id === userId);
 
@@ -260,7 +264,7 @@ app.get('/me', app.oauth.authenticate(), (req, res) => {
 
 /**
  * @swagger
- * /users:
+ * /v1/users:
  *   get:
  *     summary: Lister tous les utilisateurs
  *     tags: [Users]
@@ -281,7 +285,7 @@ app.get('/me', app.oauth.authenticate(), (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.get('/users', app.oauth.authenticate(), (req, res) => {
+v1Router.get('/users', app.oauth.authenticate(), (req, res) => {
   const users = model.users.map(u => ({
     id: u.id,
     username: u.username
@@ -292,7 +296,7 @@ app.get('/users', app.oauth.authenticate(), (req, res) => {
 
 /**
  * @swagger
- * /debug/dump:
+ * /v1/debug/dump:
  *   get:
  *     summary: Afficher le contenu du store en mémoire
  *     tags: [Debug]
@@ -348,7 +352,7 @@ app.get('/users', app.oauth.authenticate(), (req, res) => {
  *                         type: string
  *                         format: date-time
  */
-app.get('/debug/dump', (req, res) => {
+v1Router.get('/debug/dump', (req, res) => {
   res.json({
     clients: model.clients.map(c => ({
       clientId: c.clientId,
@@ -369,6 +373,9 @@ app.get('/debug/dump', (req, res) => {
     }))
   });
 });
+
+// Monter le router v1
+app.use('/v1', v1Router);
 
 /**
  * Gestion des erreurs 404
@@ -402,13 +409,13 @@ app.listen(PORT, () => {
   console.log('\nDocumentation:');
   console.log(`  Swagger UI:  http://localhost:${PORT}/api-docs`);
   console.log(`  OpenAPI JSON: http://localhost:${PORT}/swagger.json`);
-  console.log('\nEndpoints disponibles:');
-  console.log('  GET  /health          - Santé du serveur');
-  console.log('  POST /oauth/token     - Obtenir un token');
-  console.log('  GET  /secure          - Route protégée (exemple)');
-  console.log('  GET  /me              - Informations utilisateur connecté');
-  console.log('  GET  /users           - Liste des utilisateurs');
-  console.log('  GET  /debug/dump      - Debug du store en mémoire');
+  console.log('\nEndpoints disponibles (API v1):');
+  console.log('  GET  /v1/health          - Santé du serveur');
+  console.log('  POST /v1/oauth/token     - Obtenir un token');
+  console.log('  GET  /v1/secure          - Route protégée (exemple)');
+  console.log('  GET  /v1/me              - Informations utilisateur connecté');
+  console.log('  GET  /v1/users           - Liste des utilisateurs');
+  console.log('  GET  /v1/debug/dump      - Debug du store en mémoire');
   console.log('\nCredentials de test:');
   console.log('  Client ID:     client-app');
   console.log('  Client Secret: secret123');

@@ -9,15 +9,12 @@ from datetime import date
 
 class EntrepriseBase(BaseModel):
     """
-    Schéma de base pour une entreprise - Version simplifiée pour tests
+    Schéma de base pour une entreprise - Compatible devAPI
     """
     siren: str = Field(..., description="Numéro SIREN (9 chiffres)")
-    nom_unite_legale: Optional[str] = Field(None, description="Nom de l'entreprise")
     denomination_unite_legale: Optional[str] = Field(None, description="Dénomination")
     activite_principale_unite_legale: Optional[str] = Field(None, description="Code NAF/APE")
     nomenclature_activite_principale_unite_legale: Optional[str] = Field(None, description="Nomenclature activité")
-    tranche_effectifs_unite_legale: Optional[str] = Field(None, description="Tranche d'effectifs")
-    date_creation: Optional[date] = Field(None, description="Date de création")
 
     class Config:
         from_attributes = True
@@ -62,16 +59,16 @@ class EntrepriseJSONLD(BaseModel):
             **{
                 "@id": f"siren:{entreprise.siren}",
                 "identifier": entreprise.siren,
-                "name": entreprise.nom_unite_legale or entreprise.denomination_unite_legale,
+                "name": entreprise.denomination_unite_legale,
                 "legalName": entreprise.denomination_unite_legale,
-                "alternativeName": None,  # Non disponible dans le modèle simplifié
-                "foundingDate": entreprise.date_creation.isoformat() if entreprise.date_creation else None,
+                "alternativeName": None,
+                "foundingDate": None,
                 "naics": entreprise.activite_principale_unite_legale,
-                "numberOfEmployees": entreprise.tranche_effectifs_unite_legale,
-                "legalForm": None,  # Non disponible dans le modèle simplifié
-                "additionalType": None,  # Non disponible dans le modèle simplifié
-                "socialEnterprise": False,  # Non disponible dans le modèle simplifié
-                "isEmployer": False  # Non disponible dans le modèle simplifié
+                "numberOfEmployees": None,
+                "legalForm": None,
+                "additionalType": None,
+                "socialEnterprise": False,
+                "isEmployer": False
             }
         )
 
