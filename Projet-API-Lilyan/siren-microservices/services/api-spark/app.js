@@ -67,8 +67,16 @@ const swaggerOptions = {
     },
     servers: [
       {
+        url: 'http://spark.siren.local',
+        description: 'Serveur via Nginx Proxy (recommandé)'
+      },
+      {
         url: 'http://localhost:3002',
-        description: 'Serveur de développement'
+        description: 'Serveur de développement direct'
+      },
+      {
+        url: 'http://api-spark:3002',
+        description: 'Serveur Docker interne'
       }
     ],
     components: {
@@ -513,7 +521,10 @@ app.get('/stats/activites/bottom', verifyToken, async (req, res) => {
 
 // Démarrer le serveur
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`API Spark listening on http://0.0.0.0:${PORT}`);
-  console.log(`Swagger UI: http://localhost:${PORT}/api-docs`);
+  console.log('========================================');
+  console.log('API Spark démarrée (v1)');
+  console.log(`Swagger UI: http://spark.siren.local/api-docs`);
+  console.log(`Direct (dev): http://localhost:${PORT}/api-docs`);
   console.log(`Database: ${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`);
+  console.log('========================================');
 });

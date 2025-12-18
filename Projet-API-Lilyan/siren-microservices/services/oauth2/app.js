@@ -404,11 +404,11 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log('========================================');
   console.log(`OAuth2 Server démarré sur le port ${PORT}`);
-  console.log(`http://localhost:${PORT}`);
   console.log('========================================');
   console.log('\nDocumentation:');
-  console.log(`  Swagger UI:  http://localhost:${PORT}/api-docs`);
-  console.log(`  OpenAPI JSON: http://localhost:${PORT}/swagger.json`);
+  console.log(`  Swagger UI:   http://oauth.siren.local/api-docs`);
+  console.log(`  OpenAPI JSON: http://oauth.siren.local/swagger.json`);
+  console.log(`  Direct (dev): http://localhost:${PORT}/api-docs`);
   console.log('\nEndpoints disponibles (API v1):');
   console.log('  GET  /v1/health          - Santé du serveur');
   console.log('  POST /v1/oauth/token     - Obtenir un token');
@@ -416,11 +416,11 @@ app.listen(PORT, () => {
   console.log('  GET  /v1/me              - Informations utilisateur connecté');
   console.log('  GET  /v1/users           - Liste des utilisateurs');
   console.log('  GET  /v1/debug/dump      - Debug du store en mémoire');
-  console.log('\nCredentials de test:');
+  console.log('\nCredentials configurés (.env):');
   console.log('  Client ID:     client-app');
-  console.log('  Client Secret: secret123');
-  console.log('  Username:      user1');
-  console.log('  Password:      password123');
+  console.log('  Client Secret: Dev_Client_Secret_2024!');
+  console.log('  Username:      user1 / user2');
+  console.log('  Password:      Voir .env.example');
   console.log('========================================\n');
 
   // Afficher le dump initial
