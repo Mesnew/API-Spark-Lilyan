@@ -2,6 +2,49 @@
 
 Architecture conteneurisée de **5 containers Docker** combinant l'infrastructure devAPI (MySQL + Spark) avec 3 APIs REST pour la gestion et l'analyse des données SIREN (entreprises françaises).
 
+## 🚀 Installation Rapide
+
+```bash
+# 1. Cloner le repository
+git clone git@github.com:Mesnew/API-Spark-Lilyan.git
+cd API-Spark-Lilyan/Projet-API-Lilyan
+
+# 2. Configurer les variables d'environnement
+cd siren-microservices
+cp .env.example .env
+
+# 3. Télécharger les données SIREN (optionnel pour tester, obligatoire pour production)
+cd ../devAPI/data
+wget https://object.files.data.gouv.fr/data-pipeline-open/siren/stock/StockUniteLegale_utf8.zip
+unzip StockUniteLegale_utf8.zip
+cd ../../devAPI
+
+# 4. Démarrer l'infrastructure (MySQL + Spark)
+docker-compose up -d
+
+# Attendre que les services devAPI soient prêts (~5-10 minutes au premier démarrage)
+docker-compose logs -f
+
+# 5. Dans un autre terminal, démarrer les APIs
+cd ../siren-microservices
+docker-compose up -d
+
+# 6. (Optionnel) Configurer le reverse proxy avec sous-domaines
+sudo nano /etc/hosts
+# Ajouter ces lignes :
+# 127.0.0.1  oauth.siren.local
+# 127.0.0.1  mysql.siren.local
+# 127.0.0.1  spark.siren.local
+
+# 7. Tester
+./test_reverse_proxy.sh
+```
+
+**Accès aux services :**
+- OAuth2 (Swagger): http://localhost:3000/api-docs ou http://oauth.siren.local/docs
+- API MySQL (Swagger): http://localhost:3001/docs ou http://mysql.siren.local/docs
+- API Spark (Swagger): http://localhost:3002/docs ou http://spark.siren.local/docs
+
 ## Architecture
 
 ```
