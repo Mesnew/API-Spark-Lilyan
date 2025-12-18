@@ -1,0 +1,56 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: mysql8
+    restart: unless-stopped
+    mem_limit: 4g
+    env_file: ./.env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3367:${MYSQL_PORT}"
+    volumes:
+      - ./my.cnf:/etc/mysql/conf.d/my.cnf
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysqladmin ping -h 127.0.0.1 -usirenuser --silent" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  dbcli:
+    build:
+      context: .
+      dockerfile: dbcli.Dockerfile
+    container_name: dbcli
+    mem_limit: 4g
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: ./.env
+    volumes:
+      - ./data:/app/data:ro
+
+  spark:
+    build:
+      context: .
+      dockerfile: analyticcli.Dockerfile
+    container_name: spark
+    mem_limit: 4g
+    depends_on:
+      db:
+        condition: service_healthy
+      dbcli:
+        condition: service_completed_successfully
+    ports:
+      - "15002:15002"
+    env_file: ./.env
+    environment:
+      - JAVA_TOOL_OPTIONS=-Dlog4j2.disable.jmx=true
+
+volumes:
+  db_data:
