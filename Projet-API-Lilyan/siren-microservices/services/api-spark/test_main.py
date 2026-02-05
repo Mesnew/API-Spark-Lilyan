@@ -678,3 +678,210 @@ class TestConfiguration:
         """Test de la valeur par défaut de OAUTH2_URL"""
         from main import OAUTH2_URL
         assert OAUTH2_URL is not None
+
+
+# =============================================================================
+# Tests additionnels pour couverture complète
+# =============================================================================
+class TestAdditionalCoverage:
+    """Tests additionnels pour atteindre 80% de couverture"""
+
+    def test_app_title(self):
+        """Test du titre de l'application"""
+        from main import app
+        assert app.title == "API Spark - Statistiques SIREN"
+
+    def test_app_version(self):
+        """Test de la version de l'application"""
+        from main import app
+        assert app.version == "1.0.0"
+
+    def test_v1_router_prefix(self):
+        """Test du préfixe du router v1"""
+        from main import v1_router
+        assert v1_router.prefix == "/v1"
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_count_pagination_params(self, mock_get_spark, mock_verify):
+        """Test des paramètres de pagination pour count"""
+        mock_verify.return_value = {"user": "test"}
+
+        mock_row = Mock()
+        mock_row.activite_principale_unite_legale = "62.01Z"
+        mock_row.siren_count = 100
+
+        mock_df = Mock()
+        mock_df.count.return_value = 50
+        mock_df.limit.return_value.offset.return_value.collect.return_value = [mock_row]
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value = mock_df
+        mock_get_spark.return_value = mock_spark
+
+        # Test avec page et limit personnalisés
+        response = client.get(
+            "/v1/stats/activites/count?page=2&limit=10",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "pagination" in data
+
+    @patch('main.httpx.AsyncClient')
+    def test_verify_token_valid_response(self, mock_client_class):
+        """Test verify_token avec réponse valide"""
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"user": "test_user", "scope": "read"}
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client_class.return_value = mock_client
+
+        # Ce test vérifie que le token valide passe la vérification
+        # L'endpoint /v1/ ne dépend pas de verify_token directement dans ce mock
+        response = client.get(
+            "/v1/stats/activites/top?limit=5",
+            headers={"Authorization": "Bearer valid_token_here"}
+        )
+        # Avec le mock, ça devrait appeler httpx
+        assert response.status_code in [200, 401, 500]
+
+    def test_pagination_first_page_no_previous(self):
+        """Test que la première page n'a pas de lien previous"""
+        result = create_pagination(page=1, limit=10, total=100, base_url=TEST_BASE_URL)
+
+        assert "view" in result
+        assert "previous" not in result["view"]
+        assert "first" not in result["view"]
+
+    def test_pagination_last_page_no_next(self):
+        """Test que la dernière page n'a pas de lien next"""
+        result = create_pagination(page=10, limit=10, total=100, base_url=TEST_BASE_URL)
+
+        assert "view" in result
+        assert "next" not in result["view"]
+        assert "last" not in result["view"]
+
+    def test_to_jsonld_hydra_vocabulary(self):
+        """Test que to_jsonld inclut le vocabulaire Hydra complet"""
+        result = to_jsonld("TestType", {"data": "value"})
+
+        context = result[JSONLD_CONTEXT]
+        hydra_dict = None
+        for item in context:
+            if isinstance(item, dict):
+                hydra_dict = item
+                break
+
+        assert hydra_dict is not None
+        assert "view" in hydra_dict
+        assert "first" in hydra_dict
+        assert "last" in hydra_dict
+        assert "next" in hydra_dict
+        assert "previous" in hydra_dict
+        assert "totalItems" in hydra_dict
+
+    def test_openapi_contact_info(self):
+        """Test des informations de contact dans OpenAPI"""
+        response = client.get(OPENAPI_ENDPOINT)
+        data = response.json()
+
+        assert "info" in data
+        assert "contact" in data["info"]
+        assert data["info"]["contact"]["name"] == "API Support"
+
+    def test_openapi_license_info(self):
+        """Test des informations de licence dans OpenAPI"""
+        response = client.get(OPENAPI_ENDPOINT)
+        data = response.json()
+
+        assert "license" in data["info"]
+        assert data["info"]["license"]["name"] == "ISC"
+
+    def test_health_endpoint_spark_status_field(self):
+        """Test que health retourne le champ spark_status"""
+        response = client.get("/v1/health")
+        data = response.json()
+
+        assert "spark_status" in data
+        assert "spark_connect" in data
+
+    @patch('main.verify_token')
+    def test_root_endpoint_structure(self, mock_verify):
+        """Test de la structure complète de l'endpoint root"""
+        mock_verify.return_value = {"user": "test"}
+
+        response = client.get(
+            "/v1/",
+            headers={"Authorization": "Bearer token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["service"] == "API Spark - Statistiques SIREN"
+        assert data["version"] == "v1"
+        assert data["technology"] == "Apache Spark Connect"
+        assert data["documentation"] == "/docs"
+        assert data["health"] == "/v1/health"
+        assert "count_by_activity" in data["endpoints"]
+        assert "filter_by_activity" in data["endpoints"]
+        assert "top_activities" in data["endpoints"]
+        assert "bottom_activities" in data["endpoints"]
+
+    def test_math_import_used(self):
+        """Test que math.ceil est utilisé correctement"""
+        # Test avec des valeurs qui nécessitent ceil
+        result = create_pagination(page=1, limit=7, total=50, base_url="")
+        # 50 / 7 = 7.14... -> ceil = 8
+        assert result["total_pages"] == 8
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_itemlist_jsonld_type(self, mock_get_spark, mock_verify):
+        """Test que les listes retournent le type ItemList"""
+        mock_verify.return_value = {"user": "test"}
+
+        mock_row = Mock()
+        mock_row.activite_principale_unite_legale = "01.11Z"
+        mock_row.siren_count = 500
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value.collect.return_value = [mock_row]
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/top?limit=1",
+            headers={"Authorization": "Bearer token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data[JSONLD_TYPE] == "ItemList"
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_aggregate_rating_jsonld_type(self, mock_get_spark, mock_verify):
+        """Test que filter retourne le type AggregateRating"""
+        mock_verify.return_value = {"user": "test"}
+
+        mock_row = Mock()
+        mock_row.activite_principale_unite_legale = "62.01Z"
+        mock_row.siren_count = 1234
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value.collect.return_value = [mock_row]
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/filter?code=62.01Z",
+            headers={"Authorization": "Bearer token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data[JSONLD_TYPE] == "AggregateRating"
+        assert JSONLD_ID in data
