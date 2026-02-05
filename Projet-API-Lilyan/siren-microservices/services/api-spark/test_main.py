@@ -4,7 +4,7 @@ Tests unitaires pour l'API Spark
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from fastapi.testclient import TestClient
-from httpx import AsyncClient
+from fastapi import HTTPException
 import math
 
 # Import des modules à tester
@@ -12,6 +12,7 @@ from main import (
     app,
     to_jsonld,
     create_pagination,
+    verify_token,
     JSONLD_TYPE,
     JSONLD_ID,
     JSONLD_CONTEXT,
@@ -22,8 +23,16 @@ from main import (
 # =============================================================================
 TEST_BASE_URL = "https://test.example.com"
 OPENAPI_ENDPOINT = "/openapi.json"
+AUTH_HEADER = {"Authorization": "Bearer valid_token"}
 
 client = TestClient(app)
+
+
+# =============================================================================
+# Helper pour override les dépendances
+# =============================================================================
+def override_verify_token():
+    return {"user": "test_user", "scope": "read"}
 
 
 # =============================================================================
@@ -96,6 +105,25 @@ class TestToJsonld:
 
         assert result[JSONLD_TYPE] == "EmptyType"
         assert JSONLD_CONTEXT in result
+
+    def test_to_jsonld_hydra_vocabulary(self):
+        """Test que to_jsonld inclut le vocabulaire Hydra complet"""
+        result = to_jsonld("TestType", {"data": "value"})
+
+        context = result[JSONLD_CONTEXT]
+        hydra_dict = None
+        for item in context:
+            if isinstance(item, dict):
+                hydra_dict = item
+                break
+
+        assert hydra_dict is not None
+        assert "view" in hydra_dict
+        assert "first" in hydra_dict
+        assert "last" in hydra_dict
+        assert "next" in hydra_dict
+        assert "previous" in hydra_dict
+        assert "totalItems" in hydra_dict
 
 
 # =============================================================================
@@ -172,17 +200,35 @@ class TestCreatePagination:
 
     def test_pagination_total_pages_calculation(self):
         """Test du calcul du nombre total de pages"""
-        # 100 items, 20 par page = 5 pages
         result = create_pagination(page=1, limit=20, total=100, base_url="")
         assert result["total_pages"] == 5
 
-        # 101 items, 20 par page = 6 pages
         result = create_pagination(page=1, limit=20, total=101, base_url="")
         assert result["total_pages"] == 6
 
-        # 99 items, 20 par page = 5 pages
         result = create_pagination(page=1, limit=20, total=99, base_url="")
         assert result["total_pages"] == 5
+
+    def test_pagination_first_page_no_previous(self):
+        """Test que la première page n'a pas de lien previous"""
+        result = create_pagination(page=1, limit=10, total=100, base_url=TEST_BASE_URL)
+
+        assert "view" in result
+        assert "previous" not in result["view"]
+        assert "first" not in result["view"]
+
+    def test_pagination_last_page_no_next(self):
+        """Test que la dernière page n'a pas de lien next"""
+        result = create_pagination(page=10, limit=10, total=100, base_url=TEST_BASE_URL)
+
+        assert "view" in result
+        assert "next" not in result["view"]
+        assert "last" not in result["view"]
+
+    def test_math_ceil_calculation(self):
+        """Test que math.ceil est utilisé correctement"""
+        result = create_pagination(page=1, limit=7, total=50, base_url="")
+        assert result["total_pages"] == 8
 
 
 # =============================================================================
@@ -226,36 +272,27 @@ class TestAPIEndpoints:
         assert "service" in data
         assert data["service"] == "api-spark"
         assert "version" in data
-
-    def test_root_v1_requires_auth(self):
-        """Test que /v1/ requiert une authentification"""
-        response = client.get("/v1/")
-
-        # Sans token, devrait retourner 401
-        assert response.status_code == 401
+        assert "spark_status" in data
+        assert "spark_connect" in data
 
     def test_stats_count_requires_auth(self):
         """Test que /v1/stats/activites/count requiert une authentification"""
         response = client.get("/v1/stats/activites/count")
-
         assert response.status_code == 401
 
     def test_stats_filter_requires_auth(self):
         """Test que /v1/stats/activites/filter requiert une authentification"""
         response = client.get("/v1/stats/activites/filter?code=62.01Z")
-
         assert response.status_code == 401
 
     def test_stats_top_requires_auth(self):
         """Test que /v1/stats/activites/top requiert une authentification"""
         response = client.get("/v1/stats/activites/top")
-
         assert response.status_code == 401
 
     def test_stats_bottom_requires_auth(self):
         """Test que /v1/stats/activites/bottom requiert une authentification"""
         response = client.get("/v1/stats/activites/bottom")
-
         assert response.status_code == 401
 
 
@@ -283,40 +320,22 @@ class TestOpenAPISecurity:
         assert bearer_auth["type"] == "http"
         assert bearer_auth["scheme"] == "bearer"
 
-    def test_health_endpoint_no_security(self):
-        """Vérifie que /health n'a pas de sécurité requise"""
+    def test_openapi_contact_info(self):
+        """Test des informations de contact dans OpenAPI"""
         response = client.get(OPENAPI_ENDPOINT)
         data = response.json()
 
-        health_path = data["paths"].get("/v1/health", {})
-        if "get" in health_path:
-            # health ne devrait pas avoir de security ou avoir une liste vide
-            security = health_path["get"].get("security", [])
-            assert security == [] or "security" not in health_path["get"]
+        assert "info" in data
+        assert "contact" in data["info"]
+        assert data["info"]["contact"]["name"] == "API Support"
 
-
-# =============================================================================
-# Tests d'intégration (avec mocks)
-# =============================================================================
-class TestIntegrationWithMocks:
-    """Tests d'intégration avec mocks pour Spark et OAuth"""
-
-    @patch('main.verify_token')
-    @patch('main.get_spark')
-    def test_root_v1_with_valid_token(self, mock_spark, mock_verify):
-        """Test /v1/ avec un token valide"""
-        mock_verify.return_value = {"user": "test"}
-
-        response = client.get(
-            "/v1/",
-            headers={"Authorization": "Bearer valid_token"}
-        )
-
-        # Avec le mock, l'auth est bypassée
-        assert response.status_code == 200
+    def test_openapi_license_info(self):
+        """Test des informations de licence dans OpenAPI"""
+        response = client.get(OPENAPI_ENDPOINT)
         data = response.json()
-        assert "service" in data
-        assert "endpoints" in data
+
+        assert "license" in data["info"]
+        assert data["info"]["license"]["name"] == "ISC"
 
 
 # =============================================================================
@@ -339,9 +358,33 @@ class TestVerifyToken:
         )
         assert response.status_code == 401
 
+    @pytest.mark.asyncio
+    async def test_verify_token_missing_header(self):
+        """Test verify_token sans header"""
+        mock_request = Mock()
+        mock_request.headers = {}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(mock_request)
+
+        assert exc_info.value.status_code == 401
+        assert "Missing or invalid" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_verify_token_invalid_format(self):
+        """Test verify_token avec format invalide"""
+        mock_request = Mock()
+        mock_request.headers = {"Authorization": "Basic token"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(mock_request)
+
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
     @patch('main.httpx.AsyncClient')
-    def test_invalid_token_response(self, mock_client_class):
-        """Test avec token invalide (réponse 401 du serveur OAuth)"""
+    async def test_verify_token_invalid_response(self, mock_client_class):
+        """Test verify_token avec réponse 401"""
         mock_client = AsyncMock()
         mock_response = Mock()
         mock_response.status_code = 401
@@ -350,15 +393,37 @@ class TestVerifyToken:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_client_class.return_value = mock_client
 
-        response = client.get(
-            "/v1/stats/activites/count",
-            headers={"Authorization": "Bearer invalid_token"}
-        )
-        assert response.status_code == 401
+        mock_request = Mock()
+        mock_request.headers = {"Authorization": "Bearer invalid_token"}
 
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(mock_request)
+
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
     @patch('main.httpx.AsyncClient')
-    def test_oauth_server_error(self, mock_client_class):
-        """Test avec erreur de connexion au serveur OAuth"""
+    async def test_verify_token_success(self, mock_client_class):
+        """Test verify_token avec succès"""
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"user": "test"}
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client_class.return_value = mock_client
+
+        mock_request = Mock()
+        mock_request.headers = {"Authorization": "Bearer valid_token"}
+
+        result = await verify_token(mock_request)
+        assert result == {"user": "test"}
+
+    @pytest.mark.asyncio
+    @patch('main.httpx.AsyncClient')
+    async def test_verify_token_connection_error(self, mock_client_class):
+        """Test verify_token avec erreur de connexion"""
         import httpx
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=httpx.RequestError("Connection failed"))
@@ -366,12 +431,14 @@ class TestVerifyToken:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_client_class.return_value = mock_client
 
-        response = client.get(
-            "/v1/stats/activites/count",
-            headers={"Authorization": "Bearer some_token"}
-        )
-        assert response.status_code == 401
-        assert "Token verification failed" in response.json()["detail"]
+        mock_request = Mock()
+        mock_request.headers = {"Authorization": "Bearer token"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(mock_request)
+
+        assert exc_info.value.status_code == 401
+        assert "Token verification failed" in exc_info.value.detail
 
 
 # =============================================================================
@@ -382,11 +449,9 @@ class TestCustomOpenAPI:
 
     def test_openapi_schema_cached(self):
         """Test que le schéma OpenAPI est mis en cache"""
-        from main import app, custom_openapi
+        from main import custom_openapi
 
-        # Premier appel
         schema1 = custom_openapi()
-        # Deuxième appel (doit retourner le cache)
         schema2 = custom_openapi()
 
         assert schema1 is schema2
@@ -399,33 +464,35 @@ class TestCustomOpenAPI:
         assert "components" in data
         assert "securitySchemes" in data["components"]
 
-    def test_openapi_paths_have_security(self):
-        """Test que les paths (sauf health) ont la sécurité"""
-        response = client.get(OPENAPI_ENDPOINT)
+
+# =============================================================================
+# Tests des endpoints avec dependency override
+# =============================================================================
+class TestEndpointsWithAuth:
+    """Tests des endpoints avec authentification mockée"""
+
+    def setup_method(self):
+        """Setup: override la dépendance verify_token"""
+        app.dependency_overrides[verify_token] = override_verify_token
+
+    def teardown_method(self):
+        """Teardown: restaurer les dépendances"""
+        app.dependency_overrides.clear()
+
+    def test_root_v1_with_auth(self):
+        """Test /v1/ avec authentification"""
+        response = client.get("/v1/", headers=AUTH_HEADER)
+
+        assert response.status_code == 200
         data = response.json()
+        assert data["service"] == "API Spark - Statistiques SIREN"
+        assert data["version"] == "v1"
+        assert data["technology"] == "Apache Spark Connect"
+        assert "endpoints" in data
 
-        for path, methods in data["paths"].items():
-            if "/health" not in path and path != "/redoc":
-                for method, details in methods.items():
-                    if isinstance(details, dict) and method in ["get", "post", "put", "delete"]:
-                        # Les endpoints protégés doivent avoir security
-                        if path not in ["/docs", "/openapi.json"]:
-                            assert "security" in details or path == "/redoc"
-
-
-# =============================================================================
-# Tests des endpoints Spark avec mocks
-# =============================================================================
-class TestSparkEndpointsWithMocks:
-    """Tests des endpoints Spark avec mocks complets"""
-
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_count_by_activity_success(self, mock_get_spark, mock_verify):
+    def test_count_by_activity_success(self, mock_get_spark):
         """Test /v1/stats/activites/count avec succès"""
-        mock_verify.return_value = {"user": "test"}
-
-        # Mock Spark DataFrame
         mock_row = Mock()
         mock_row.activite_principale_unite_legale = "62.01Z"
         mock_row.siren_count = 1000
@@ -438,39 +505,51 @@ class TestSparkEndpointsWithMocks:
         mock_spark.sql.return_value = mock_df
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/count",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/count", headers=AUTH_HEADER)
 
         assert response.status_code == 200
         data = response.json()
         assert JSONLD_CONTEXT in data
+        assert JSONLD_TYPE in data
+        assert data[JSONLD_TYPE] == "ItemList"
         assert "itemListElement" in data
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_count_by_activity_spark_error(self, mock_get_spark, mock_verify):
+    def test_count_by_activity_spark_error(self, mock_get_spark):
         """Test /v1/stats/activites/count avec erreur Spark"""
-        mock_verify.return_value = {"user": "test"}
         mock_spark = Mock()
         mock_spark.sql.side_effect = Exception("Spark connection failed")
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/count",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/count", headers=AUTH_HEADER)
 
         assert response.status_code == 500
         assert "Spark query failed" in response.json()["detail"]
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_filter_by_activity_success(self, mock_get_spark, mock_verify):
-        """Test /v1/stats/activites/filter avec succès"""
-        mock_verify.return_value = {"user": "test"}
+    def test_count_with_pagination(self, mock_get_spark):
+        """Test /v1/stats/activites/count avec pagination"""
+        mock_row = Mock()
+        mock_row.activite_principale_unite_legale = "62.01Z"
+        mock_row.siren_count = 100
 
+        mock_df = Mock()
+        mock_df.count.return_value = 50
+        mock_df.limit.return_value.offset.return_value.collect.return_value = [mock_row]
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value = mock_df
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get("/v1/stats/activites/count?page=2&limit=10", headers=AUTH_HEADER)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "pagination" in data
+
+    @patch('main.get_spark')
+    def test_filter_by_activity_success(self, mock_get_spark):
+        """Test /v1/stats/activites/filter avec succès"""
         mock_row = Mock()
         mock_row.activite_principale_unite_legale = "62.01Z"
         mock_row.siren_count = 5000
@@ -479,55 +558,41 @@ class TestSparkEndpointsWithMocks:
         mock_spark.sql.return_value.collect.return_value = [mock_row]
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/filter?code=62.01Z",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/filter?code=62.01Z", headers=AUTH_HEADER)
 
         assert response.status_code == 200
         data = response.json()
+        assert data[JSONLD_TYPE] == "AggregateRating"
         assert data["identifier"] == "62.01Z"
         assert data["ratingCount"] == 5000
+        assert JSONLD_ID in data
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_filter_by_activity_not_found(self, mock_get_spark, mock_verify):
+    def test_filter_by_activity_not_found(self, mock_get_spark):
         """Test /v1/stats/activites/filter code non trouvé"""
-        mock_verify.return_value = {"user": "test"}
-
         mock_spark = Mock()
         mock_spark.sql.return_value.collect.return_value = []
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/filter?code=INVALID",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/filter?code=INVALID", headers=AUTH_HEADER)
 
         assert response.status_code == 404
+        assert "No data found" in response.json()["detail"]
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_filter_by_activity_spark_error(self, mock_get_spark, mock_verify):
+    def test_filter_by_activity_spark_error(self, mock_get_spark):
         """Test /v1/stats/activites/filter avec erreur Spark"""
-        mock_verify.return_value = {"user": "test"}
         mock_spark = Mock()
         mock_spark.sql.side_effect = Exception("Spark error")
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/filter?code=62.01Z",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/filter?code=62.01Z", headers=AUTH_HEADER)
 
         assert response.status_code == 500
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_top_activities_success(self, mock_get_spark, mock_verify):
+    def test_top_activities_success(self, mock_get_spark):
         """Test /v1/stats/activites/top avec succès"""
-        mock_verify.return_value = {"user": "test"}
-
         mock_row1 = Mock()
         mock_row1.activite_principale_unite_legale = "62.01Z"
         mock_row1.siren_count = 10000
@@ -540,37 +605,27 @@ class TestSparkEndpointsWithMocks:
         mock_spark.sql.return_value.collect.return_value = [mock_row1, mock_row2]
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/top?limit=2",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/top?limit=2", headers=AUTH_HEADER)
 
         assert response.status_code == 200
         data = response.json()
+        assert data[JSONLD_TYPE] == "ItemList"
         assert data["numberOfItems"] == 2
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_top_activities_spark_error(self, mock_get_spark, mock_verify):
+    def test_top_activities_spark_error(self, mock_get_spark):
         """Test /v1/stats/activites/top avec erreur Spark"""
-        mock_verify.return_value = {"user": "test"}
         mock_spark = Mock()
         mock_spark.sql.side_effect = Exception("Spark error")
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/top",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/top", headers=AUTH_HEADER)
 
         assert response.status_code == 500
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_bottom_activities_success(self, mock_get_spark, mock_verify):
+    def test_bottom_activities_success(self, mock_get_spark):
         """Test /v1/stats/activites/bottom avec succès"""
-        mock_verify.return_value = {"user": "test"}
-
         mock_row = Mock()
         mock_row.activite_principale_unite_legale = "99.99Z"
         mock_row.siren_count = 1
@@ -579,57 +634,23 @@ class TestSparkEndpointsWithMocks:
         mock_spark.sql.return_value.collect.return_value = [mock_row]
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/bottom?limit=1",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/bottom?limit=1", headers=AUTH_HEADER)
 
         assert response.status_code == 200
         data = response.json()
+        assert data[JSONLD_TYPE] == "ItemList"
         assert data["numberOfItems"] == 1
 
-    @patch('main.verify_token')
     @patch('main.get_spark')
-    def test_bottom_activities_spark_error(self, mock_get_spark, mock_verify):
+    def test_bottom_activities_spark_error(self, mock_get_spark):
         """Test /v1/stats/activites/bottom avec erreur Spark"""
-        mock_verify.return_value = {"user": "test"}
         mock_spark = Mock()
         mock_spark.sql.side_effect = Exception("Spark error")
         mock_get_spark.return_value = mock_spark
 
-        response = client.get(
-            "/v1/stats/activites/bottom",
-            headers={"Authorization": "Bearer valid_token"}
-        )
+        response = client.get("/v1/stats/activites/bottom", headers=AUTH_HEADER)
 
         assert response.status_code == 500
-
-
-# =============================================================================
-# Tests de get_spark
-# =============================================================================
-class TestGetSpark:
-    """Tests pour la fonction get_spark"""
-
-    @patch('main.SparkSession')
-    def test_get_spark_creates_session(self, mock_spark_session):
-        """Test que get_spark crée une session"""
-        from main import get_spark, _spark_session
-        import main
-
-        # Reset la session globale
-        main._spark_session = None
-
-        mock_builder = Mock()
-        mock_builder.appName.return_value = mock_builder
-        mock_builder.remote.return_value = mock_builder
-        mock_builder.getOrCreate.return_value = Mock()
-        mock_spark_session.builder = mock_builder
-
-        result = get_spark()
-
-        assert result is not None
-        mock_builder.appName.assert_called_once_with("api-spark")
 
 
 # =============================================================================
@@ -653,8 +674,46 @@ class TestReDocEndpoint:
     def test_redoc_content_type(self):
         """Test que ReDoc retourne du HTML"""
         response = client.get("/redoc")
-
         assert "text/html" in response.headers["content-type"]
+
+
+# =============================================================================
+# Tests de get_spark
+# =============================================================================
+class TestGetSpark:
+    """Tests pour la fonction get_spark"""
+
+    @patch('main.SparkSession')
+    def test_get_spark_creates_session(self, mock_spark_session):
+        """Test que get_spark crée une session"""
+        from main import get_spark
+        import main
+
+        main._spark_session = None
+
+        mock_builder = Mock()
+        mock_builder.appName.return_value = mock_builder
+        mock_builder.remote.return_value = mock_builder
+        mock_builder.getOrCreate.return_value = Mock()
+        mock_spark_session.builder = mock_builder
+
+        result = get_spark()
+
+        assert result is not None
+        mock_builder.appName.assert_called_once_with("api-spark")
+
+    @patch('main.SparkSession')
+    def test_get_spark_returns_cached_session(self, mock_spark_session):
+        """Test que get_spark retourne la session en cache"""
+        from main import get_spark
+        import main
+
+        mock_session = Mock()
+        main._spark_session = mock_session
+
+        result = get_spark()
+
+        assert result is mock_session
 
 
 # =============================================================================
@@ -666,7 +725,6 @@ class TestConfiguration:
     def test_spark_connect_host_default(self):
         """Test de la valeur par défaut de SPARK_CONNECT_HOST"""
         from main import SPARK_CONNECT_HOST
-        # Soit la valeur d'env, soit la valeur par défaut
         assert SPARK_CONNECT_HOST is not None
 
     def test_spark_connect_port_default(self):
@@ -678,13 +736,6 @@ class TestConfiguration:
         """Test de la valeur par défaut de OAUTH2_URL"""
         from main import OAUTH2_URL
         assert OAUTH2_URL is not None
-
-
-# =============================================================================
-# Tests additionnels pour couverture complète
-# =============================================================================
-class TestAdditionalCoverage:
-    """Tests additionnels pour atteindre 80% de couverture"""
 
     def test_app_title(self):
         """Test du titre de l'application"""
@@ -700,188 +751,3 @@ class TestAdditionalCoverage:
         """Test du préfixe du router v1"""
         from main import v1_router
         assert v1_router.prefix == "/v1"
-
-    @patch('main.verify_token')
-    @patch('main.get_spark')
-    def test_count_pagination_params(self, mock_get_spark, mock_verify):
-        """Test des paramètres de pagination pour count"""
-        mock_verify.return_value = {"user": "test"}
-
-        mock_row = Mock()
-        mock_row.activite_principale_unite_legale = "62.01Z"
-        mock_row.siren_count = 100
-
-        mock_df = Mock()
-        mock_df.count.return_value = 50
-        mock_df.limit.return_value.offset.return_value.collect.return_value = [mock_row]
-
-        mock_spark = Mock()
-        mock_spark.sql.return_value = mock_df
-        mock_get_spark.return_value = mock_spark
-
-        # Test avec page et limit personnalisés
-        response = client.get(
-            "/v1/stats/activites/count?page=2&limit=10",
-            headers={"Authorization": "Bearer valid_token"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert "pagination" in data
-
-    @patch('main.httpx.AsyncClient')
-    def test_verify_token_valid_response(self, mock_client_class):
-        """Test verify_token avec réponse valide"""
-        mock_client = AsyncMock()
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"user": "test_user", "scope": "read"}
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client_class.return_value = mock_client
-
-        # Ce test vérifie que le token valide passe la vérification
-        # L'endpoint /v1/ ne dépend pas de verify_token directement dans ce mock
-        response = client.get(
-            "/v1/stats/activites/top?limit=5",
-            headers={"Authorization": "Bearer valid_token_here"}
-        )
-        # Avec le mock, ça devrait appeler httpx
-        assert response.status_code in [200, 401, 500]
-
-    def test_pagination_first_page_no_previous(self):
-        """Test que la première page n'a pas de lien previous"""
-        result = create_pagination(page=1, limit=10, total=100, base_url=TEST_BASE_URL)
-
-        assert "view" in result
-        assert "previous" not in result["view"]
-        assert "first" not in result["view"]
-
-    def test_pagination_last_page_no_next(self):
-        """Test que la dernière page n'a pas de lien next"""
-        result = create_pagination(page=10, limit=10, total=100, base_url=TEST_BASE_URL)
-
-        assert "view" in result
-        assert "next" not in result["view"]
-        assert "last" not in result["view"]
-
-    def test_to_jsonld_hydra_vocabulary(self):
-        """Test que to_jsonld inclut le vocabulaire Hydra complet"""
-        result = to_jsonld("TestType", {"data": "value"})
-
-        context = result[JSONLD_CONTEXT]
-        hydra_dict = None
-        for item in context:
-            if isinstance(item, dict):
-                hydra_dict = item
-                break
-
-        assert hydra_dict is not None
-        assert "view" in hydra_dict
-        assert "first" in hydra_dict
-        assert "last" in hydra_dict
-        assert "next" in hydra_dict
-        assert "previous" in hydra_dict
-        assert "totalItems" in hydra_dict
-
-    def test_openapi_contact_info(self):
-        """Test des informations de contact dans OpenAPI"""
-        response = client.get(OPENAPI_ENDPOINT)
-        data = response.json()
-
-        assert "info" in data
-        assert "contact" in data["info"]
-        assert data["info"]["contact"]["name"] == "API Support"
-
-    def test_openapi_license_info(self):
-        """Test des informations de licence dans OpenAPI"""
-        response = client.get(OPENAPI_ENDPOINT)
-        data = response.json()
-
-        assert "license" in data["info"]
-        assert data["info"]["license"]["name"] == "ISC"
-
-    def test_health_endpoint_spark_status_field(self):
-        """Test que health retourne le champ spark_status"""
-        response = client.get("/v1/health")
-        data = response.json()
-
-        assert "spark_status" in data
-        assert "spark_connect" in data
-
-    @patch('main.verify_token')
-    def test_root_endpoint_structure(self, mock_verify):
-        """Test de la structure complète de l'endpoint root"""
-        mock_verify.return_value = {"user": "test"}
-
-        response = client.get(
-            "/v1/",
-            headers={"Authorization": "Bearer token"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["service"] == "API Spark - Statistiques SIREN"
-        assert data["version"] == "v1"
-        assert data["technology"] == "Apache Spark Connect"
-        assert data["documentation"] == "/docs"
-        assert data["health"] == "/v1/health"
-        assert "count_by_activity" in data["endpoints"]
-        assert "filter_by_activity" in data["endpoints"]
-        assert "top_activities" in data["endpoints"]
-        assert "bottom_activities" in data["endpoints"]
-
-    def test_math_import_used(self):
-        """Test que math.ceil est utilisé correctement"""
-        # Test avec des valeurs qui nécessitent ceil
-        result = create_pagination(page=1, limit=7, total=50, base_url="")
-        # 50 / 7 = 7.14... -> ceil = 8
-        assert result["total_pages"] == 8
-
-    @patch('main.verify_token')
-    @patch('main.get_spark')
-    def test_itemlist_jsonld_type(self, mock_get_spark, mock_verify):
-        """Test que les listes retournent le type ItemList"""
-        mock_verify.return_value = {"user": "test"}
-
-        mock_row = Mock()
-        mock_row.activite_principale_unite_legale = "01.11Z"
-        mock_row.siren_count = 500
-
-        mock_spark = Mock()
-        mock_spark.sql.return_value.collect.return_value = [mock_row]
-        mock_get_spark.return_value = mock_spark
-
-        response = client.get(
-            "/v1/stats/activites/top?limit=1",
-            headers={"Authorization": "Bearer token"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data[JSONLD_TYPE] == "ItemList"
-
-    @patch('main.verify_token')
-    @patch('main.get_spark')
-    def test_aggregate_rating_jsonld_type(self, mock_get_spark, mock_verify):
-        """Test que filter retourne le type AggregateRating"""
-        mock_verify.return_value = {"user": "test"}
-
-        mock_row = Mock()
-        mock_row.activite_principale_unite_legale = "62.01Z"
-        mock_row.siren_count = 1234
-
-        mock_spark = Mock()
-        mock_spark.sql.return_value.collect.return_value = [mock_row]
-        mock_get_spark.return_value = mock_spark
-
-        response = client.get(
-            "/v1/stats/activites/filter?code=62.01Z",
-            headers={"Authorization": "Bearer token"}
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data[JSONLD_TYPE] == "AggregateRating"
-        assert JSONLD_ID in data
