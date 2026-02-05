@@ -17,6 +17,12 @@ from main import (
     JSONLD_CONTEXT,
 )
 
+# =============================================================================
+# Constantes de test (évite les duplications détectées par SonarQube)
+# =============================================================================
+TEST_BASE_URL = "https://test.example.com"
+OPENAPI_ENDPOINT = "/openapi.json"
+
 client = TestClient(app)
 
 
@@ -100,7 +106,7 @@ class TestCreatePagination:
 
     def test_pagination_first_page(self):
         """Test pagination sur la première page"""
-        result = create_pagination(page=1, limit=20, total=100, base_url="http://test.com")
+        result = create_pagination(page=1, limit=20, total=100, base_url=TEST_BASE_URL)
 
         assert result["page"] == 1
         assert result["limit"] == 20
@@ -111,7 +117,7 @@ class TestCreatePagination:
 
     def test_pagination_middle_page(self):
         """Test pagination sur une page au milieu"""
-        result = create_pagination(page=3, limit=20, total=100, base_url="http://test.com")
+        result = create_pagination(page=3, limit=20, total=100, base_url=TEST_BASE_URL)
 
         assert result["page"] == 3
         assert result["has_next"] is True
@@ -119,7 +125,7 @@ class TestCreatePagination:
 
     def test_pagination_last_page(self):
         """Test pagination sur la dernière page"""
-        result = create_pagination(page=5, limit=20, total=100, base_url="http://test.com")
+        result = create_pagination(page=5, limit=20, total=100, base_url=TEST_BASE_URL)
 
         assert result["page"] == 5
         assert result["has_next"] is False
@@ -127,7 +133,7 @@ class TestCreatePagination:
 
     def test_pagination_single_page(self):
         """Test avec une seule page"""
-        result = create_pagination(page=1, limit=20, total=10, base_url="http://test.com")
+        result = create_pagination(page=1, limit=20, total=10, base_url=TEST_BASE_URL)
 
         assert result["total_pages"] == 1
         assert result["has_next"] is False
@@ -135,14 +141,14 @@ class TestCreatePagination:
 
     def test_pagination_empty_result(self):
         """Test avec aucun résultat"""
-        result = create_pagination(page=1, limit=20, total=0, base_url="http://test.com")
+        result = create_pagination(page=1, limit=20, total=0, base_url=TEST_BASE_URL)
 
         assert result["total_pages"] == 1
         assert result["totalItems"] == 0
 
     def test_pagination_view_links(self):
         """Test des liens de vue Hydra"""
-        result = create_pagination(page=2, limit=10, total=50, base_url="http://test.com")
+        result = create_pagination(page=2, limit=10, total=50, base_url=TEST_BASE_URL)
 
         assert "view" in result
         assert JSONLD_ID in result["view"]
@@ -151,7 +157,7 @@ class TestCreatePagination:
 
     def test_pagination_navigation_links(self):
         """Test des liens de navigation"""
-        result = create_pagination(page=2, limit=10, total=50, base_url="http://test.com")
+        result = create_pagination(page=2, limit=10, total=50, base_url=TEST_BASE_URL)
 
         assert "first" in result["view"]
         assert "previous" in result["view"]
@@ -195,7 +201,7 @@ class TestAPIEndpoints:
 
     def test_openapi_endpoint(self):
         """Test de l'endpoint OpenAPI"""
-        response = client.get("/openapi.json")
+        response = client.get(OPENAPI_ENDPOINT)
 
         assert response.status_code == 200
         data = response.json()
@@ -261,7 +267,7 @@ class TestOpenAPISecurity:
 
     def test_openapi_has_security_schemes(self):
         """Vérifie que le schéma OpenAPI contient les schémas de sécurité"""
-        response = client.get("/openapi.json")
+        response = client.get(OPENAPI_ENDPOINT)
         data = response.json()
 
         assert "components" in data
@@ -270,7 +276,7 @@ class TestOpenAPISecurity:
 
     def test_openapi_bearer_auth_config(self):
         """Vérifie la configuration du Bearer Auth"""
-        response = client.get("/openapi.json")
+        response = client.get(OPENAPI_ENDPOINT)
         data = response.json()
 
         bearer_auth = data["components"]["securitySchemes"]["bearerAuth"]
@@ -279,7 +285,7 @@ class TestOpenAPISecurity:
 
     def test_health_endpoint_no_security(self):
         """Vérifie que /health n'a pas de sécurité requise"""
-        response = client.get("/openapi.json")
+        response = client.get(OPENAPI_ENDPOINT)
         data = response.json()
 
         health_path = data["paths"].get("/v1/health", {})
