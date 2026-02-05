@@ -317,3 +317,364 @@ class TestIntegrationWithMocks:
         data = response.json()
         assert "service" in data
         assert "endpoints" in data
+
+
+# =============================================================================
+# Tests de verify_token
+# =============================================================================
+class TestVerifyToken:
+    """Tests pour la fonction verify_token"""
+
+    def test_missing_auth_header(self):
+        """Test sans header Authorization"""
+        response = client.get("/v1/stats/activites/count")
+        assert response.status_code == 401
+        assert "Missing or invalid" in response.json()["detail"]
+
+    def test_invalid_auth_header_format(self):
+        """Test avec header Authorization mal formaté"""
+        response = client.get(
+            "/v1/stats/activites/count",
+            headers={"Authorization": "Basic invalid"}
+        )
+        assert response.status_code == 401
+
+    @patch('main.httpx.AsyncClient')
+    def test_invalid_token_response(self, mock_client_class):
+        """Test avec token invalide (réponse 401 du serveur OAuth)"""
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.status_code = 401
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client_class.return_value = mock_client
+
+        response = client.get(
+            "/v1/stats/activites/count",
+            headers={"Authorization": "Bearer invalid_token"}
+        )
+        assert response.status_code == 401
+
+    @patch('main.httpx.AsyncClient')
+    def test_oauth_server_error(self, mock_client_class):
+        """Test avec erreur de connexion au serveur OAuth"""
+        import httpx
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.RequestError("Connection failed"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client_class.return_value = mock_client
+
+        response = client.get(
+            "/v1/stats/activites/count",
+            headers={"Authorization": "Bearer some_token"}
+        )
+        assert response.status_code == 401
+        assert "Token verification failed" in response.json()["detail"]
+
+
+# =============================================================================
+# Tests custom_openapi
+# =============================================================================
+class TestCustomOpenAPI:
+    """Tests pour la fonction custom_openapi"""
+
+    def test_openapi_schema_cached(self):
+        """Test que le schéma OpenAPI est mis en cache"""
+        from main import app, custom_openapi
+
+        # Premier appel
+        schema1 = custom_openapi()
+        # Deuxième appel (doit retourner le cache)
+        schema2 = custom_openapi()
+
+        assert schema1 is schema2
+
+    def test_openapi_has_components(self):
+        """Test que le schéma a des composants"""
+        response = client.get(OPENAPI_ENDPOINT)
+        data = response.json()
+
+        assert "components" in data
+        assert "securitySchemes" in data["components"]
+
+    def test_openapi_paths_have_security(self):
+        """Test que les paths (sauf health) ont la sécurité"""
+        response = client.get(OPENAPI_ENDPOINT)
+        data = response.json()
+
+        for path, methods in data["paths"].items():
+            if "/health" not in path and path != "/redoc":
+                for method, details in methods.items():
+                    if isinstance(details, dict) and method in ["get", "post", "put", "delete"]:
+                        # Les endpoints protégés doivent avoir security
+                        if path not in ["/docs", "/openapi.json"]:
+                            assert "security" in details or path == "/redoc"
+
+
+# =============================================================================
+# Tests des endpoints Spark avec mocks
+# =============================================================================
+class TestSparkEndpointsWithMocks:
+    """Tests des endpoints Spark avec mocks complets"""
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_count_by_activity_success(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/count avec succès"""
+        mock_verify.return_value = {"user": "test"}
+
+        # Mock Spark DataFrame
+        mock_row = Mock()
+        mock_row.activite_principale_unite_legale = "62.01Z"
+        mock_row.siren_count = 1000
+
+        mock_df = Mock()
+        mock_df.count.return_value = 1
+        mock_df.limit.return_value.offset.return_value.collect.return_value = [mock_row]
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value = mock_df
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/count",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert JSONLD_CONTEXT in data
+        assert "itemListElement" in data
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_count_by_activity_spark_error(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/count avec erreur Spark"""
+        mock_verify.return_value = {"user": "test"}
+        mock_spark = Mock()
+        mock_spark.sql.side_effect = Exception("Spark connection failed")
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/count",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 500
+        assert "Spark query failed" in response.json()["detail"]
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_filter_by_activity_success(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/filter avec succès"""
+        mock_verify.return_value = {"user": "test"}
+
+        mock_row = Mock()
+        mock_row.activite_principale_unite_legale = "62.01Z"
+        mock_row.siren_count = 5000
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value.collect.return_value = [mock_row]
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/filter?code=62.01Z",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["identifier"] == "62.01Z"
+        assert data["ratingCount"] == 5000
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_filter_by_activity_not_found(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/filter code non trouvé"""
+        mock_verify.return_value = {"user": "test"}
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value.collect.return_value = []
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/filter?code=INVALID",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 404
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_filter_by_activity_spark_error(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/filter avec erreur Spark"""
+        mock_verify.return_value = {"user": "test"}
+        mock_spark = Mock()
+        mock_spark.sql.side_effect = Exception("Spark error")
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/filter?code=62.01Z",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 500
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_top_activities_success(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/top avec succès"""
+        mock_verify.return_value = {"user": "test"}
+
+        mock_row1 = Mock()
+        mock_row1.activite_principale_unite_legale = "62.01Z"
+        mock_row1.siren_count = 10000
+
+        mock_row2 = Mock()
+        mock_row2.activite_principale_unite_legale = "47.11Z"
+        mock_row2.siren_count = 8000
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value.collect.return_value = [mock_row1, mock_row2]
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/top?limit=2",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["numberOfItems"] == 2
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_top_activities_spark_error(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/top avec erreur Spark"""
+        mock_verify.return_value = {"user": "test"}
+        mock_spark = Mock()
+        mock_spark.sql.side_effect = Exception("Spark error")
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/top",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 500
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_bottom_activities_success(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/bottom avec succès"""
+        mock_verify.return_value = {"user": "test"}
+
+        mock_row = Mock()
+        mock_row.activite_principale_unite_legale = "99.99Z"
+        mock_row.siren_count = 1
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value.collect.return_value = [mock_row]
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/bottom?limit=1",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["numberOfItems"] == 1
+
+    @patch('main.verify_token')
+    @patch('main.get_spark')
+    def test_bottom_activities_spark_error(self, mock_get_spark, mock_verify):
+        """Test /v1/stats/activites/bottom avec erreur Spark"""
+        mock_verify.return_value = {"user": "test"}
+        mock_spark = Mock()
+        mock_spark.sql.side_effect = Exception("Spark error")
+        mock_get_spark.return_value = mock_spark
+
+        response = client.get(
+            "/v1/stats/activites/bottom",
+            headers={"Authorization": "Bearer valid_token"}
+        )
+
+        assert response.status_code == 500
+
+
+# =============================================================================
+# Tests de get_spark
+# =============================================================================
+class TestGetSpark:
+    """Tests pour la fonction get_spark"""
+
+    @patch('main.SparkSession')
+    def test_get_spark_creates_session(self, mock_spark_session):
+        """Test que get_spark crée une session"""
+        from main import get_spark, _spark_session
+        import main
+
+        # Reset la session globale
+        main._spark_session = None
+
+        mock_builder = Mock()
+        mock_builder.appName.return_value = mock_builder
+        mock_builder.remote.return_value = mock_builder
+        mock_builder.getOrCreate.return_value = Mock()
+        mock_spark_session.builder = mock_builder
+
+        result = get_spark()
+
+        assert result is not None
+        mock_builder.appName.assert_called_once_with("api-spark")
+
+
+# =============================================================================
+# Tests ReDoc endpoint
+# =============================================================================
+class TestReDocEndpoint:
+    """Tests pour l'endpoint ReDoc"""
+
+    def test_redoc_contains_required_elements(self):
+        """Test que ReDoc contient les éléments requis"""
+        response = client.get("/redoc")
+
+        assert response.status_code == 200
+        html = response.text
+
+        assert "<!DOCTYPE html>" in html
+        assert "redoc" in html.lower()
+        assert "openapi.json" in html
+        assert "redoc@2.1.3" in html
+
+    def test_redoc_content_type(self):
+        """Test que ReDoc retourne du HTML"""
+        response = client.get("/redoc")
+
+        assert "text/html" in response.headers["content-type"]
+
+
+# =============================================================================
+# Tests des constantes de configuration
+# =============================================================================
+class TestConfiguration:
+    """Tests pour la configuration"""
+
+    def test_spark_connect_host_default(self):
+        """Test de la valeur par défaut de SPARK_CONNECT_HOST"""
+        from main import SPARK_CONNECT_HOST
+        # Soit la valeur d'env, soit la valeur par défaut
+        assert SPARK_CONNECT_HOST is not None
+
+    def test_spark_connect_port_default(self):
+        """Test de la valeur par défaut de SPARK_CONNECT_PORT"""
+        from main import SPARK_CONNECT_PORT
+        assert SPARK_CONNECT_PORT is not None
+
+    def test_oauth2_url_default(self):
+        """Test de la valeur par défaut de OAUTH2_URL"""
+        from main import OAUTH2_URL
+        assert OAUTH2_URL is not None
