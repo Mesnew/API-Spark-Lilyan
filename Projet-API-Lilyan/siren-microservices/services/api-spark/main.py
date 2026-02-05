@@ -5,6 +5,8 @@ FastAPI avec Spark Connect, Swagger, JSON-LD et OAuth2
 from fastapi import FastAPI, Depends, APIRouter, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.models import OAuthFlows, OAuthFlowPassword
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordBearer
 from pyspark.sql import SparkSession
 from typing import List, Optional
@@ -12,13 +14,23 @@ import httpx
 import math
 import os
 
+# =============================================================================
+# Constants - JSON-LD keys (fixes SonarQube duplicate literal issue)
+# =============================================================================
+JSONLD_TYPE = "@type"
+JSONLD_ID = "@id"
+JSONLD_CONTEXT = "@context"
+
+# =============================================================================
 # Configuration
+# =============================================================================
 SPARK_CONNECT_HOST = os.getenv("SPARK_CONNECT_HOST", "spark")
 SPARK_CONNECT_PORT = os.getenv("SPARK_CONNECT_PORT", "15002")
 OAUTH2_URL = os.getenv("OAUTH2_URL", "http://oauth2:3000")
 
 # Spark session (lazy initialization)
 _spark_session = None
+
 
 def get_spark():
     """Get or create Spark session (lazy initialization)"""
@@ -31,7 +43,9 @@ def get_spark():
     return _spark_session
 
 
+# =============================================================================
 # OAuth2 Verification
+# =============================================================================
 async def verify_token(request: Request):
     """Vérifie le token OAuth2 auprès du service OAuth2"""
     auth_header = request.headers.get("Authorization")
@@ -45,8 +59,6 @@ async def verify_token(request: Request):
     token = auth_header.split(" ")[1]
 
     try:
-        # Note: express-oauth-server a des problèmes avec le header Bearer,
-        # donc on utilise le query parameter access_token
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{OAUTH2_URL}/v1/secure?access_token={token}"
@@ -56,17 +68,20 @@ async def verify_token(request: Request):
                 raise HTTPException(status_code=401, detail="Invalid token")
 
             return response.json()
-    except Exception as e:
+    except httpx.RequestError as e:
         raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
 
 
+# =============================================================================
+# JSON-LD Helpers
+# =============================================================================
 def to_jsonld(type_name: str, data: dict) -> dict:
     """Convertit les données en JSON-LD avec contexte Hydra"""
     return {
-        "@context": [
+        JSONLD_CONTEXT: [
             "https://schema.org/",
             {
-                "hydra": "http://www.w3.org/ns/hydra/core#",
+                "hydra": "https://www.w3.org/ns/hydra/core#",
                 "view": "hydra:view",
                 "first": "hydra:first",
                 "last": "hydra:last",
@@ -75,7 +90,7 @@ def to_jsonld(type_name: str, data: dict) -> dict:
                 "totalItems": "hydra:totalItems"
             }
         ],
-        "@type": type_name,
+        JSONLD_TYPE: type_name,
         **data
     }
 
@@ -95,8 +110,8 @@ def create_pagination(page: int, limit: int, total: int, base_url: str) -> dict:
 
     if base_url:
         pagination["view"] = {
-            "@id": f"{base_url}?page={page}&limit={limit}",
-            "@type": "hydra:PartialCollectionView"
+            JSONLD_ID: f"{base_url}?page={page}&limit={limit}",
+            JSONLD_TYPE: "hydra:PartialCollectionView"
         }
 
         if page > 1:
@@ -110,7 +125,9 @@ def create_pagination(page: int, limit: int, total: int, base_url: str) -> dict:
     return pagination
 
 
-# Créer l'application FastAPI
+# =============================================================================
+# FastAPI Application
+# =============================================================================
 app = FastAPI(
     title="API Spark - Statistiques SIREN",
     description="""
@@ -129,7 +146,7 @@ app = FastAPI(
 
     Tous les endpoints (sauf `/health`) nécessitent un token OAuth2 valide.
 
-    1. Obtenir un token depuis l'API OAuth2: `POST http://oauth.siren.local/v1/oauth/token`
+    1. Obtenir un token depuis l'API OAuth2: `POST https://oauth.siren.local/v1/oauth/token`
     2. Utiliser le token dans le header: `Authorization: Bearer <token>`
 
     ## Technologie
@@ -145,12 +162,38 @@ app = FastAPI(
         "name": "ISC",
     },
     docs_url="/docs",
-    redoc_url="/redoc",
+    redoc_url=None,
     swagger_ui_init_oauth={
         "clientId": "client-app",
         "appName": "API Spark"
     }
 )
+
+
+# Route personnalisée pour ReDoc avec version stable
+@app.get("/redoc", include_in_schema=False)
+async def redoc_html():
+    return HTMLResponse("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API Spark - Statistiques SIREN - ReDoc</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+    <link rel="shortcut icon" href="https://fastapi.tiangolo.com/img/favicon.png">
+    <style>
+      body { margin: 0; padding: 0; }
+    </style>
+</head>
+<body>
+    <noscript>ReDoc requires Javascript to function. Please enable it.</noscript>
+    <redoc spec-url="/openapi.json"></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@2.1.3/bundles/redoc.standalone.js"></script>
+</body>
+</html>
+    """)
+
 
 # CORS
 app.add_middleware(
@@ -161,24 +204,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Personnaliser le schéma OpenAPI pour ajouter le bouton Authorize
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
 
-    openapi_schema = app.openapi()
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        contact=app.contact,
+        license_info=app.license_info,
+    )
 
-    # Ajouter les schémas de sécurité
+    if "components" not in openapi_schema:
+        openapi_schema["components"] = {}
+
     openapi_schema["components"]["securitySchemes"] = {
         "bearerAuth": {
             "type": "http",
             "scheme": "bearer",
             "bearerFormat": "OAuth2",
-            "description": "Token OAuth2 obtenu depuis http://oauth.siren.local/v1/oauth/token"
+            "description": "Token OAuth2 obtenu depuis https://oauth.siren.local/v1/oauth/token"
         }
     }
 
-    # Ajouter la sécurité globale (sauf pour /health)
     for path, path_item in openapi_schema["paths"].items():
         if "/health" not in path:
             for method in path_item.values():
@@ -188,10 +240,12 @@ def custom_openapi():
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
+
 app.openapi = custom_openapi
 
 # Router pour API v1
 v1_router = APIRouter(prefix="/v1", tags=["v1"])
+
 
 @app.on_event("startup")
 async def startup():
@@ -199,8 +253,8 @@ async def startup():
     print("=" * 50)
     print("API Spark démarrée (v1)")
     print(f"Spark Connect: {SPARK_CONNECT_HOST}:{SPARK_CONNECT_PORT}")
-    print("Documentation: http://spark.siren.local/docs")
-    print("Endpoints: http://spark.siren.local/v1/")
+    print("Documentation: https://spark.siren.local/docs")
+    print("Endpoints: https://spark.siren.local/v1/")
     print("Direct (dev): http://localhost:3002/")
     print("=" * 50)
 
@@ -223,7 +277,6 @@ async def health_check():
     **Pas d'authentification requise pour ce endpoint.**
     """
     try:
-        # Tester la connexion à Spark
         get_spark().sql("SELECT 1").collect()
         spark_status = "connected"
     except Exception as e:
@@ -255,15 +308,8 @@ async def count_by_activity(
 ):
     """
     Retourne le nombre d'entreprises groupées par code d'activité principale.
-
-    - **page**: Numéro de page (défaut: 1)
-    - **limit**: Nombre d'éléments par page (défaut: 20, max: 100)
-    - **Authorization**: Token Bearer OAuth2 requis
-
-    Utilise Spark Connect pour l'agrégation analytique.
     """
     try:
-        # Utiliser la vue Spark créée par analyticcli.scala
         df = get_spark().sql("""
             SELECT activite_principale_unite_legale, siren_count
             FROM global_temp.activity
@@ -271,18 +317,14 @@ async def count_by_activity(
             ORDER BY siren_count DESC
         """)
 
-        # Compter le total
         total = df.count()
-
-        # Pagination
         offset = (page - 1) * limit
         results = df.limit(limit).offset(offset).collect()
 
-        # Convertir en JSON-LD
         items = [
             {
-                "@type": "AggregateRating",
-                "@id": f"activity:{row.activite_principale_unite_legale}",
+                JSONLD_TYPE: "AggregateRating",
+                JSONLD_ID: f"activity:{row.activite_principale_unite_legale}",
                 "identifier": row.activite_principale_unite_legale,
                 "ratingCount": int(row.siren_count)
             }
@@ -320,9 +362,6 @@ async def filter_by_activity(
 ):
     """
     Retourne le nombre d'entreprises pour un code d'activité spécifique.
-
-    - **code**: Code d'activité principale (NAF/APE)
-    - **Authorization**: Token Bearer OAuth2 requis
     """
     try:
         result = get_spark().sql(f"""
@@ -340,7 +379,7 @@ async def filter_by_activity(
         row = result[0]
 
         return to_jsonld("AggregateRating", {
-            "@id": f"activity:{row.activite_principale_unite_legale}",
+            JSONLD_ID: f"activity:{row.activite_principale_unite_legale}",
             "identifier": row.activite_principale_unite_legale,
             "ratingCount": int(row.siren_count)
         })
@@ -366,9 +405,6 @@ async def top_activities(
 ):
     """
     Retourne les codes d'activité avec le plus grand nombre d'entreprises.
-
-    - **limit**: Nombre de résultats (défaut: 20, max: 100)
-    - **Authorization**: Token Bearer OAuth2 requis
     """
     try:
         results = get_spark().sql(f"""
@@ -381,8 +417,8 @@ async def top_activities(
 
         items = [
             {
-                "@type": "AggregateRating",
-                "@id": f"activity:{row.activite_principale_unite_legale}",
+                JSONLD_TYPE: "AggregateRating",
+                JSONLD_ID: f"activity:{row.activite_principale_unite_legale}",
                 "identifier": row.activite_principale_unite_legale,
                 "ratingCount": int(row.siren_count)
             }
@@ -414,9 +450,6 @@ async def bottom_activities(
 ):
     """
     Retourne les codes d'activité avec le plus petit nombre d'entreprises.
-
-    - **limit**: Nombre de résultats (défaut: 20, max: 100)
-    - **Authorization**: Token Bearer OAuth2 requis
     """
     try:
         results = get_spark().sql(f"""
@@ -429,8 +462,8 @@ async def bottom_activities(
 
         items = [
             {
-                "@type": "AggregateRating",
-                "@id": f"activity:{row.activite_principale_unite_legale}",
+                JSONLD_TYPE: "AggregateRating",
+                JSONLD_ID: f"activity:{row.activite_principale_unite_legale}",
                 "identifier": row.activite_principale_unite_legale,
                 "ratingCount": int(row.siren_count)
             }
