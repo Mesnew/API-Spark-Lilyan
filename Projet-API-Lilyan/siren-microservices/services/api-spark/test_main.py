@@ -751,3 +751,94 @@ class TestConfiguration:
         """Test du préfixe du router v1"""
         from main import v1_router
         assert v1_router.prefix == "/v1"
+
+
+# =============================================================================
+# Tests des événements startup/shutdown
+# =============================================================================
+class TestLifecycleEvents:
+    """Tests pour les événements de cycle de vie"""
+
+    @pytest.mark.asyncio
+    @patch('builtins.print')
+    async def test_startup_event(self, mock_print):
+        """Test de l'événement startup"""
+        from main import startup
+
+        await startup()
+
+        # Vérifie que print a été appelé plusieurs fois
+        assert mock_print.call_count >= 7
+
+    @pytest.mark.asyncio
+    @patch('main.get_spark')
+    async def test_shutdown_event(self, mock_get_spark):
+        """Test de l'événement shutdown"""
+        from main import shutdown
+
+        mock_spark = Mock()
+        mock_get_spark.return_value = mock_spark
+
+        await shutdown()
+
+        mock_spark.stop.assert_called_once()
+
+
+# =============================================================================
+# Tests health check avec Spark connecté
+# =============================================================================
+class TestHealthCheckWithSpark:
+    """Tests pour health check avec différents états Spark"""
+
+    @pytest.mark.asyncio
+    @patch('main.get_spark')
+    async def test_health_check_spark_connected(self, mock_get_spark):
+        """Test health check avec Spark connecté"""
+        from main import health_check
+
+        mock_spark = Mock()
+        mock_spark.sql.return_value.collect.return_value = [(1,)]
+        mock_get_spark.return_value = mock_spark
+
+        result = await health_check()
+
+        assert result["status"] == "OK"
+        assert result["spark_status"] == "connected"
+
+    @pytest.mark.asyncio
+    @patch('main.get_spark')
+    async def test_health_check_spark_error(self, mock_get_spark):
+        """Test health check avec erreur Spark"""
+        from main import health_check
+
+        mock_spark = Mock()
+        mock_spark.sql.side_effect = Exception("Connection refused")
+        mock_get_spark.return_value = mock_spark
+
+        result = await health_check()
+
+        assert result["status"] == "OK"
+        assert "error:" in result["spark_status"]
+
+
+# =============================================================================
+# Test du bloc __main__
+# =============================================================================
+class TestMainBlock:
+    """Tests pour le bloc __main__"""
+
+    def test_uvicorn_importable(self):
+        """Test que uvicorn est importable"""
+        import uvicorn
+        assert uvicorn is not None
+
+    def test_main_module_name(self):
+        """Test du nom du module"""
+        import main
+        assert main.__name__ == "main"
+
+    def test_app_is_fastapi_instance(self):
+        """Test que app est une instance FastAPI"""
+        from fastapi import FastAPI
+        from main import app
+        assert isinstance(app, FastAPI)
